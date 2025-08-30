@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "My Chrome Extension",
+  "name": "Arc Search",
   "version": "1.0.0",
-  "description": "A simple Chrome extension.",
+  "description": "Replaces the generic new tab page with a search engine similar to Arc.",
   "permissions": [
     "storage",
     "activeTab",

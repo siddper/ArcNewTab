@@ -93,6 +93,7 @@ function toggleBlackRectangle(tabs) {
     // Create the search input with icon
     const searchInput = document.createElement('input');
     searchInput.id = '_x_extension_search_input_2024_unique_';
+    searchInput.autocomplete = 'off';
     searchInput.type = 'text';
     searchInput.placeholder = 'Search or Enter URL...';
     searchInput.style.cssText = `
@@ -157,19 +158,22 @@ function toggleBlackRectangle(tabs) {
     });
     
     // Add click outside to close functionality
-    document.addEventListener('click', function(e) {
+    const clickOutsideHandler = function(e) {
       if (!overlay.contains(e.target)) {
         overlay.remove();
+        document.removeEventListener('click', clickOutsideHandler);
       }
-    });
+    };
+    document.addEventListener('click', clickOutsideHandler);
     
     // Add keyboard navigation
     let selectedIndex = -1; // -1 means input is focused, 0+ means suggestion is selected
     const suggestionItems = [];
     
-    document.addEventListener('keydown', function(e) {
+    const keydownHandler = function(e) {
       if (e.key === 'Escape' && overlay) {
         overlay.remove();
+        document.removeEventListener('keydown', keydownHandler);
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
         if (selectedIndex === -1) {
@@ -207,6 +211,7 @@ function toggleBlackRectangle(tabs) {
             tabId: tabs[selectedIndex].id
           });
           overlay.remove();
+          document.removeEventListener('keydown', keydownHandler);
         } else if (query) {
           // Handle search or URL navigation
           chrome.runtime.sendMessage({
@@ -214,9 +219,12 @@ function toggleBlackRectangle(tabs) {
             query: query
           });
           overlay.remove();
+          document.removeEventListener('keydown', keydownHandler);
         }
       }
-    });
+    };
+    
+    document.addEventListener('keydown', keydownHandler);
     
     function updateSelection() {
       suggestionItems.forEach((item, index) => {
@@ -415,6 +423,7 @@ function toggleBlackRectangle(tabs) {
           tabId: tab.id
         });
         overlay.remove();
+        document.removeEventListener('keydown', keydownHandler);
       });
 
       // Add click handler to select item
@@ -424,6 +433,7 @@ function toggleBlackRectangle(tabs) {
           tabId: tab.id
         });
         overlay.remove();
+        document.removeEventListener('keydown', keydownHandler);
       });
 
       leftSide.appendChild(favicon);
