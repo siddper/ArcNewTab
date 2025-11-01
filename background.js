@@ -1,5 +1,6 @@
+
 chrome.commands.onCommand.addListener(function(command) {
-  if (command === "show-popup") {
+  if (command === "show-search") {
     // Get all tabs in the current window
     chrome.tabs.query({currentWindow: true}, function(tabs) {
       // Get the current active tab and inject the script with tabs data
@@ -38,16 +39,178 @@ chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
       const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
       chrome.tabs.create({ url: searchUrl });
     }
+  } else if (request.action === 'getSearchSuggestions') {
+    const query = request.query;
+    getSearchSuggestions(query).then(suggestions => {
+      sendResponse({ suggestions: suggestions });
+    });
+    return true; // Keep the message channel open for async response
+  } else if (request.action === 'createTab') {
+    chrome.tabs.create({ url: request.url });
   }
 });
 
+// Function to get search suggestions from history and top sites
+async function getSearchSuggestions(query) {
+  const suggestions = [];
+  
+  try {
+    // Get history items with broader search
+    const historyItems = await new Promise((resolve) => {
+      chrome.history.search({
+        text: query,
+        maxResults: 50, // Increased to get more candidates
+        startTime: Date.now() - (30 * 24 * 60 * 60 * 1000) // Last 30 days
+      }, resolve);
+    });
+    
+    // Get top sites
+    const topSites = await new Promise((resolve) => {
+      chrome.topSites.get(resolve);
+    });
+    
+    // Helper function to calculate relevance score
+    function calculateRelevanceScore(item, query) {
+      const queryLower = query.toLowerCase();
+      const titleLower = item.title ? item.title.toLowerCase() : '';
+      const urlLower = item.url.toLowerCase();
+      
+      let score = 0;
+      
+      // Exact title match (highest priority)
+      if (titleLower === queryLower) score += 100;
+      
+      // Title starts with query
+      if (titleLower.startsWith(queryLower)) score += 50;
+      
+      // Query words in title
+      const queryWords = queryLower.split(' ').filter(word => word.length > 0);
+      queryWords.forEach(word => {
+        if (titleLower.includes(word)) score += 20;
+      });
+      
+      // Partial title match
+      if (titleLower.includes(queryLower)) score += 15;
+      
+      // URL domain match
+      try {
+        const domain = new URL(item.url).hostname.toLowerCase();
+        if (domain.includes(queryLower)) score += 10;
+        if (domain.startsWith(queryLower)) score += 20;
+      } catch (e) {
+        // Invalid URL, skip domain scoring
+      }
+      
+      // URL path match
+      if (urlLower.includes(queryLower)) score += 5;
+      
+      // Recency bonus (for history items)
+      if (item.lastVisitTime) {
+        const daysSinceVisit = (Date.now() - item.lastVisitTime) / (1000 * 60 * 60 * 24);
+        if (daysSinceVisit < 1) score += 10;
+        else if (daysSinceVisit < 7) score += 5;
+        else if (daysSinceVisit < 30) score += 2;
+      }
+      
+      return score;
+    }
+    
+    // Process history items with scoring
+    const processedUrls = new Set();
+    historyItems.forEach(item => {
+      if (item.title && !processedUrls.has(item.url)) {
+        const score = calculateRelevanceScore(item, query);
+        if (score > 0) {
+          // Get favicon URL using Google's favicon service (more reliable)
+        let faviconUrl = '';
+        try {
+          const urlObj = new URL(item.url);
+          faviconUrl = `https://www.google.com/s2/favicons?domain=${urlObj.hostname}&sz=16`;
+        } catch (e) {
+          // Fallback to direct favicon URL
+          faviconUrl = item.url + '/favicon.ico';
+        }
+        
+        suggestions.push({
+            type: 'history',
+            title: item.title,
+            url: item.url,
+            favicon: faviconUrl,
+            score: score
+          });
+          processedUrls.add(item.url);
+        }
+      }
+    });
+    
+    // Process top sites with scoring
+    topSites.forEach(site => {
+      if (site.title && !processedUrls.has(site.url)) {
+        const score = calculateRelevanceScore(site, query);
+        if (score > 0) {
+          // Get favicon URL using Google's favicon service (more reliable)
+          let faviconUrl = '';
+          try {
+            const urlObj = new URL(site.url);
+            faviconUrl = `https://www.google.com/s2/favicons?domain=${urlObj.hostname}&sz=16`;
+          } catch (e) {
+            // Fallback to direct favicon URL
+            faviconUrl = site.url + '/favicon.ico';
+          }
+          
+          suggestions.push({
+            type: 'topSite',
+            title: site.title,
+            url: site.url,
+            favicon: faviconUrl,
+            score: score
+          });
+          processedUrls.add(site.url);
+        }
+      }
+    });
+    
+    // Sort by relevance score (highest first)
+    suggestions.sort((a, b) => (b.score || 0) - (a.score || 0));
+    
+    // Remove duplicates and limit results
+    const uniqueSuggestions = suggestions.filter((suggestion, index, self) => 
+      index === self.findIndex(s => s.url === suggestion.url)
+    ).slice(0, 12); // Increased limit before title deduplication
+    
+    // Also remove duplicates by title to avoid similar entries
+    const finalSuggestions = uniqueSuggestions.filter((suggestion, index, self) => 
+      index === self.findIndex(s => s.title.toLowerCase() === suggestion.title.toLowerCase())
+    ).slice(0, 8);
+    
+    console.log('Search suggestions:', finalSuggestions);
+    return finalSuggestions;
+    
+  } catch (error) {
+    console.error('Error getting search suggestions:', error);
+    return [];
+  }
+}
+
 function toggleBlackRectangle(tabs) {
+  // Helper function to remove overlay and clean up styles
+  function removeOverlay(overlayElement) {
+    if (overlayElement) {
+      overlayElement.remove();
+    }
+    // Also remove the scrollbar style
+    const scrollbarStyle = document.getElementById('_x_extension_scrollbar_style_2024_unique_');
+    if (scrollbarStyle) {
+      scrollbarStyle.remove();
+    }
+  }
+  
   // Check if the overlay already exists
   let overlay = document.getElementById('_x_extension_overlay_2024_unique_');
   
   if (overlay) {
     // If it exists, remove it (toggle off)
-    overlay.remove();
+    removeOverlay(overlay);
   } else {
     // If it doesn't exist, create it (toggle on)
     overlay = document.createElement('div');
@@ -55,24 +218,26 @@ function toggleBlackRectangle(tabs) {
     overlay.style.cssText = `
       all: unset !important;
       position: fixed !important;
-      top: 50% !important;
+      top: 20vh !important;
       left: 50% !important;
-      transform: translate(-50%, -50%) !important;
-      width: 700px !important;
+      transform: translateX(-50%) !important;
+      width: 50vw !important;
       max-width: 90vw !important;
-      background: #2C2C2C !important;
-      border: 1px solid #4F4F4F !important;
-      border-radius: 12px !important;
+      max-height: 75vh !important;
+      background:rgba(41, 41, 41, 0.8) !important;
+      backdrop-filter: blur(20px) saturate(180%) !important;
+      -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+      border: 1px solid rgba(17, 17, 17, 1) !important;
+      border-radius: 10px !important;
       box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3) !important;
       z-index: 2147483647 !important;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif !important;
       display: flex !important;
       flex-direction: column !important;
       align-items: center !important;
-      justify-content: center !important;
       box-sizing: border-box !important;
       margin: 0 !important;
-      padding: 0 !important;
+      padding: 1px !important;
       line-height: 1 !important;
       text-decoration: none !important;
       list-style: none !important;
@@ -90,6 +255,20 @@ function toggleBlackRectangle(tabs) {
     fontLink.rel = 'stylesheet';
     document.head.appendChild(fontLink);
     
+    // Add style to hide scrollbars for WebKit browsers
+    const scrollbarStyle = document.createElement('style');
+    scrollbarStyle.id = '_x_extension_scrollbar_style_2024_unique_';
+    scrollbarStyle.textContent = `
+      #_x_extension_overlay_2024_unique_ *::-webkit-scrollbar {
+        display: none !important;
+      }
+      #_x_extension_overlay_2024_unique_ * {
+        -ms-overflow-style: none !important;
+        scrollbar-width: none !important;
+      }
+    `;
+    document.head.appendChild(scrollbarStyle);
+    
     // Create the search input with icon
     const searchInput = document.createElement('input');
     searchInput.id = '_x_extension_search_input_2024_unique_';
@@ -106,8 +285,9 @@ function toggleBlackRectangle(tabs) {
       color: #E3E4E8 !important;
       font-size: 16px !important;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif !important;
+      font-weight: 500 !important;
       outline: none !important;
-      border-radius: 12px 12px 0 0 !important;
+      border-radius: 8px 8px 0 0 !important;
       box-sizing: border-box !important;
       margin: 0 !important;
       line-height: 1 !important;
@@ -115,6 +295,7 @@ function toggleBlackRectangle(tabs) {
       list-style: none !important;
       display: block !important;
       vertical-align: baseline !important;
+      caret-color: #007AFF !important;
     `;
     
     // Create search icon
@@ -157,10 +338,29 @@ function toggleBlackRectangle(tabs) {
       // Don't change selectedIndex here to allow keyboard navigation
     });
     
+    // Add input event for search suggestions
+    searchInput.addEventListener('input', function() {
+      const query = this.value.trim();
+      if (query.length > 0) {
+        // Get search suggestions
+        chrome.runtime.sendMessage({
+          action: 'getSearchSuggestions',
+          query: query
+        }, function(response) {
+          if (response && response.suggestions) {
+            updateSearchSuggestions(response.suggestions, query);
+          }
+        });
+      } else {
+        // Clear suggestions and show tabs
+        clearSearchSuggestions();
+      }
+    });
+    
     // Add click outside to close functionality
     const clickOutsideHandler = function(e) {
       if (!overlay.contains(e.target)) {
-        overlay.remove();
+        removeOverlay(overlay);
         document.removeEventListener('click', clickOutsideHandler);
       }
     };
@@ -169,10 +369,11 @@ function toggleBlackRectangle(tabs) {
     // Add keyboard navigation
     let selectedIndex = -1; // -1 means input is focused, 0+ means suggestion is selected
     const suggestionItems = [];
+    let currentSuggestions = []; // Store current suggestions for keyboard navigation
     
     const keydownHandler = function(e) {
       if (e.key === 'Escape' && overlay) {
-        overlay.remove();
+        removeOverlay(overlay);
         document.removeEventListener('keydown', keydownHandler);
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -205,12 +406,25 @@ function toggleBlackRectangle(tabs) {
         const query = searchInput.value.trim();
         
         if (selectedIndex >= 0 && suggestionItems[selectedIndex]) {
-          // Switch to existing tab
-          chrome.runtime.sendMessage({
-            action: 'switchToTab',
-            tabId: tabs[selectedIndex].id
-          });
-          overlay.remove();
+          // Check if we're showing search suggestions or tab suggestions
+          const isSearchSuggestion = query.length > 0;
+          
+          if (isSearchSuggestion && currentSuggestions[selectedIndex]) {
+            // Navigate to the suggested URL
+            console.log('Opening URL from keyboard:', currentSuggestions[selectedIndex].url);
+            chrome.runtime.sendMessage({
+              action: 'createTab',
+              url: currentSuggestions[selectedIndex].url
+            });
+          } else if (!isSearchSuggestion) {
+            // Switch to existing tab
+            chrome.runtime.sendMessage({
+              action: 'switchToTab',
+              tabId: tabs[selectedIndex].id
+            });
+          }
+          removeOverlay(overlay);
+          document.removeEventListener('click', clickOutsideHandler);
           document.removeEventListener('keydown', keydownHandler);
         } else if (query) {
           // Handle search or URL navigation
@@ -218,7 +432,8 @@ function toggleBlackRectangle(tabs) {
             action: 'searchOrNavigate',
             query: query
           });
-          overlay.remove();
+          removeOverlay(overlay);
+          document.removeEventListener('click', clickOutsideHandler);
           document.removeEventListener('keydown', keydownHandler);
         }
       }
@@ -248,6 +463,426 @@ function toggleBlackRectangle(tabs) {
       });
     }
     
+    function updateSearchSuggestions(suggestions, query) {
+      // Clear existing suggestions
+      suggestionsContainer.innerHTML = '';
+      suggestionItems.length = 0;
+      
+      // Add New Tab suggestion as first item
+      const newTabSuggestion = {
+        type: 'newtab',
+        title: 'New Tab',
+        url: 'chrome://newtab/',
+        favicon: 'https://img.icons8.com/?size=100&id=ejub91zEY6Sl&format=png&color=000000'
+      };
+      
+      // Add ChatGPT suggestion as second item
+      const chatGptSuggestion = {
+        type: 'chatgpt',
+        title: `Ask ChatGPT: "${query}"`,
+        url: `https://chatgpt.com/?q=${encodeURIComponent(query)}`,
+        favicon: 'https://img.icons8.com/?size=100&id=fO5yVwARGUEB&format=png&color=ffffff'
+      };
+      
+      // Add Perplexity suggestion as third item
+      const perplexitySuggestion = {
+        type: 'perplexity',
+        title: `Ask Perplexity: "${query}"`,
+        url: `https://perplexity.ai/search?q=${encodeURIComponent(query)}`,
+        favicon: 'https://img.icons8.com/?size=100&id=kzJWN5jCDzpq&format=png&color=000000'
+      };
+      
+      // Add New Tab, ChatGPT and Perplexity suggestions to the beginning
+      const allSuggestions = [newTabSuggestion, chatGptSuggestion, perplexitySuggestion, ...suggestions];
+      currentSuggestions = allSuggestions; // Store current suggestions including ChatGPT
+      
+      // Add search suggestions
+      allSuggestions.forEach((suggestion, index) => {
+        const suggestionItem = document.createElement('div');
+        suggestionItem.id = `_x_extension_suggestion_item_${index}_2024_unique_`;
+        const isLastItem = index === allSuggestions.length - 1;
+        suggestionItem.style.cssText = `
+          all: unset !important;
+          display: flex !important;
+          align-items: center !important;
+          justify-content: space-between !important;
+          padding: 12px 16px !important;
+          background: #1A1A1A !important;
+          border-radius: 6px !important;
+          margin-bottom: ${isLastItem ? '0' : '4px'} !important;
+          cursor: pointer !important;
+          transition: background-color 0.2s ease !important;
+          box-sizing: border-box !important;
+          margin: 0 0 ${isLastItem ? '0' : '4px'} 0 !important;
+          line-height: 1 !important;
+          text-decoration: none !important;
+          list-style: none !important;
+          outline: none !important;
+          color: inherit !important;
+          font-size: 100% !important;
+          font: inherit !important;
+          vertical-align: baseline !important;
+        `;
+        
+        suggestionItems.push(suggestionItem);
+        
+        // Create left side with icon and title
+        const leftSide = document.createElement('div');
+        leftSide.style.cssText = `
+          all: unset !important;
+          display: flex !important;
+          align-items: center !important;
+          gap: 12px !important;
+          flex: 1 !important;
+          box-sizing: border-box !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          line-height: 1 !important;
+          text-decoration: none !important;
+          list-style: none !important;
+          outline: none !important;
+          background: transparent !important;
+          color: inherit !important;
+          font-size: 100% !important;
+          font: inherit !important;
+          vertical-align: baseline !important;
+        `;
+        
+        // Create icon for suggestions - always use img for all types
+        const favicon = document.createElement('img');
+        favicon.src = suggestion.favicon || '';
+        favicon.style.cssText = `
+          all: unset !important;
+          width: 16px !important;
+          height: 16px !important;
+          border-radius: 2px !important;
+          box-sizing: border-box !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          line-height: 1 !important;
+          text-decoration: none !important;
+          list-style: none !important;
+          outline: none !important;
+          background: transparent !important;
+          color: inherit !important;
+          font-size: 100% !important;
+          font: inherit !important;
+          vertical-align: baseline !important;
+          display: block !important;
+          object-fit: contain !important;
+        `;
+        
+        // Fallback to search icon if favicon fails to load
+        favicon.onerror = function() {
+          // Replace with search icon SVG if favicon fails
+          const searchIconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#E3E4E8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/></svg>`;
+          const fallbackDiv = document.createElement('div');
+          fallbackDiv.innerHTML = searchIconSvg;
+          fallbackDiv.style.cssText = `
+            all: unset !important;
+            width: 16px !important;
+            height: 16px !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            box-sizing: border-box !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            line-height: 1 !important;
+            text-decoration: none !important;
+            list-style: none !important;
+            outline: none !important;
+            background: transparent !important;
+            color: inherit !important;
+            font-size: 100% !important;
+            font: inherit !important;
+            vertical-align: baseline !important;
+          `;
+          favicon.parentNode.replaceChild(fallbackDiv, favicon);
+        };
+        
+        // Create title with highlighted query
+        const title = document.createElement('span');
+        let highlightedTitle;
+        if (suggestion.type === 'chatgpt' || suggestion.type === 'perplexity' || suggestion.type === 'newtab') {
+          // For ChatGPT, Perplexity, and New Tab, don't highlight the query part
+          highlightedTitle = suggestion.title;
+        } else {
+          // For other suggestions, highlight the query
+          highlightedTitle = suggestion.title.replace(
+            new RegExp(`(${query})`, 'gi'),
+            '<mark style="background: #4A90E2; color: white; padding: 0 2px; border-radius: 2px;">$1</mark>'
+          );
+        }
+        title.innerHTML = highlightedTitle;
+        title.style.cssText = `
+          all: unset !important;
+          color: #E3E4E8 !important;
+          font-size: 14px !important;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif !important;
+          white-space: nowrap !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
+          max-width: 300px !important;
+          box-sizing: border-box !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          line-height: 1 !important;
+          text-decoration: none !important;
+          list-style: none !important;
+          outline: none !important;
+          background: transparent !important;
+          display: inline !important;
+          vertical-align: baseline !important;
+        `;
+        
+        // Create visit button
+        const visitButton = document.createElement('button');
+        visitButton.textContent = 'Visit';
+        visitButton.style.cssText = `
+          all: unset !important;
+          background: transparent !important;
+          color: #656565 !important;
+          border: none !important;
+          border-radius: 6px !important;
+          font-size: 12px !important;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif !important;
+          cursor: pointer !important;
+          transition: background-color 0.2s ease !important;
+          padding: 6px 12px !important;
+          box-sizing: border-box !important;
+          margin: 0 !important;
+          line-height: 1 !important;
+          text-decoration: none !important;
+          list-style: none !important;
+          outline: none !important;
+          display: inline-block !important;
+          vertical-align: baseline !important;
+        `;
+        
+        // Add hover effects
+        suggestionItem.addEventListener('mouseenter', function() {
+          if (suggestionItems.indexOf(this) !== selectedIndex) {
+            this.style.setProperty('background-color', '#232323', 'important');
+          }
+        });
+        
+        suggestionItem.addEventListener('mouseleave', function() {
+          if (suggestionItems.indexOf(this) !== selectedIndex) {
+            this.style.setProperty('background-color', '#1A1A1A', 'important');
+          }
+        });
+        
+        // Add click handler to visit URL
+        visitButton.addEventListener('click', function(e) {
+          e.stopPropagation();
+          console.log('Opening URL:', suggestion.url);
+          chrome.runtime.sendMessage({
+            action: 'createTab',
+            url: suggestion.url
+          });
+          removeOverlay(overlay);
+          document.removeEventListener('click', clickOutsideHandler);
+          document.removeEventListener('keydown', keydownHandler);
+        });
+        
+        // Add click handler to select item
+        suggestionItem.addEventListener('click', function() {
+          console.log('Opening URL:', suggestion.url);
+          chrome.runtime.sendMessage({
+            action: 'createTab',
+            url: suggestion.url
+          });
+          removeOverlay(overlay);
+          document.removeEventListener('click', clickOutsideHandler);
+          document.removeEventListener('keydown', keydownHandler);
+        });
+        
+        leftSide.appendChild(favicon);
+        leftSide.appendChild(title);
+        suggestionItem.appendChild(leftSide);
+        suggestionItem.appendChild(visitButton);
+        suggestionsContainer.appendChild(suggestionItem);
+      });
+      
+      // Update keyboard navigation
+      selectedIndex = -1;
+    }
+    
+    function clearSearchSuggestions() {
+      // Clear suggestions and show tabs again
+      suggestionsContainer.innerHTML = '';
+      suggestionItems.length = 0;
+      currentSuggestions = []; // Clear current suggestions
+      
+      // Re-add tab suggestions
+      tabs.forEach((tab, index) => {
+        const suggestionItem = document.createElement('div');
+        suggestionItem.id = `_x_extension_suggestion_item_${index}_2024_unique_`;
+        suggestionItem.style.cssText = `
+          all: unset !important;
+          display: flex !important;
+          align-items: center !important;
+          justify-content: space-between !important;
+          padding: 12px 16px !important;
+          background: #1A1A1A !important;
+          border-radius: 6px !important;
+          margin-bottom: 4px !important;
+          cursor: pointer !important;
+          transition: background-color 0.2s ease !important;
+          box-sizing: border-box !important;
+          margin: 0 0 4px 0 !important;
+          line-height: 1 !important;
+          text-decoration: none !important;
+          list-style: none !important;
+          outline: none !important;
+          color: inherit !important;
+          font-size: 100% !important;
+          font: inherit !important;
+          vertical-align: baseline !important;
+        `;
+        
+        suggestionItems.push(suggestionItem);
+        
+        // Create left side with icon and title
+        const leftSide = document.createElement('div');
+        leftSide.style.cssText = `
+          all: unset !important;
+          display: flex !important;
+          align-items: center !important;
+          gap: 12px !important;
+          flex: 1 !important;
+          box-sizing: border-box !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          line-height: 1 !important;
+          text-decoration: none !important;
+          list-style: none !important;
+          outline: none !important;
+          background: transparent !important;
+          color: inherit !important;
+          font-size: 100% !important;
+          font: inherit !important;
+          vertical-align: baseline !important;
+        `;
+        
+        // Create favicon
+        const favicon = document.createElement('img');
+        favicon.src = tab.favIconUrl || 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="%23E3E4E8" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>';
+        favicon.style.cssText = `
+          all: unset !important;
+          width: 16px !important;
+          height: 16px !important;
+          border-radius: 2px !important;
+          box-sizing: border-box !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          line-height: 1 !important;
+          text-decoration: none !important;
+          list-style: none !important;
+          outline: none !important;
+          background: transparent !important;
+          color: inherit !important;
+          font-size: 100% !important;
+          font: inherit !important;
+          vertical-align: baseline !important;
+          display: block !important;
+        `;
+        
+        // Create title
+        const title = document.createElement('span');
+        title.textContent = tab.title || 'Untitled';
+        title.style.cssText = `
+          all: unset !important;
+          color: #E3E4E8 !important;
+          font-size: 14px !important;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif !important;
+          white-space: nowrap !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
+          max-width: 300px !important;
+          box-sizing: border-box !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          line-height: 1 !important;
+          text-decoration: none !important;
+          list-style: none !important;
+          outline: none !important;
+          background: transparent !important;
+          display: inline !important;
+          vertical-align: baseline !important;
+        `;
+        
+        // Create switch button
+        const switchButton = document.createElement('button');
+        switchButton.textContent = 'Switch to Tab';
+        switchButton.style.cssText = `
+          all: unset !important;
+          background: transparent !important;
+          color: #656565 !important;
+          border: none !important;
+          border-radius: 6px !important;
+          font-size: 12px !important;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif !important;
+          cursor: pointer !important;
+          transition: background-color 0.2s ease !important;
+          padding: 6px 12px !important;
+          box-sizing: border-box !important;
+          margin: 0 !important;
+          line-height: 1 !important;
+          text-decoration: none !important;
+          list-style: none !important;
+          outline: none !important;
+          display: inline-block !important;
+          vertical-align: baseline !important;
+        `;
+        
+        // Add hover effects
+        suggestionItem.addEventListener('mouseenter', function() {
+          if (suggestionItems.indexOf(this) !== selectedIndex) {
+            this.style.setProperty('background-color', '#313131', 'important');
+          }
+        });
+        
+        suggestionItem.addEventListener('mouseleave', function() {
+          if (suggestionItems.indexOf(this) !== selectedIndex) {
+            this.style.setProperty('background-color', '#1A1A1A', 'important');
+          }
+        });
+        
+        // Add click handler to switch to tab
+        switchButton.addEventListener('click', function(e) {
+          e.stopPropagation();
+          chrome.runtime.sendMessage({
+            action: 'switchToTab',
+            tabId: tab.id
+          });
+          removeOverlay(overlay);
+          document.removeEventListener('click', clickOutsideHandler);
+          document.removeEventListener('keydown', keydownHandler);
+        });
+        
+        // Add click handler to select item
+        suggestionItem.addEventListener('click', function() {
+          chrome.runtime.sendMessage({
+            action: 'switchToTab',
+            tabId: tab.id
+          });
+          removeOverlay(overlay);
+          document.removeEventListener('click', clickOutsideHandler);
+          document.removeEventListener('keydown', keydownHandler);
+        });
+        
+        leftSide.appendChild(favicon);
+        leftSide.appendChild(title);
+        suggestionItem.appendChild(leftSide);
+        suggestionItem.appendChild(switchButton);
+        suggestionsContainer.appendChild(suggestionItem);
+      });
+      
+      selectedIndex = -1;
+    }
+    
     // Focus the input when created
     setTimeout(() => searchInput.focus(), 100);
     
@@ -259,7 +894,12 @@ function toggleBlackRectangle(tabs) {
     suggestionsContainer.style.cssText = `
       all: unset !important;
       width: 100% !important;
+      flex: 1 1 auto !important;
+      min-height: 0 !important;
+      max-height: 50vh !important;
       overflow-y: auto !important;
+      scrollbar-width: none !important;
+      -ms-overflow-style: none !important;
       background: #1A1A1A !important;
       border-radius: 0 0 12px 12px !important;
       padding: 8px !important;
@@ -286,7 +926,7 @@ function toggleBlackRectangle(tabs) {
         justify-content: space-between !important;
         padding: 12px 16px !important;
         background: #1A1A1A !important;
-        border-radius: 8px !important;
+        border-radius: 6px !important;
         margin-bottom: 4px !important;
         cursor: pointer !important;
         transition: background-color 0.2s ease !important;
@@ -405,7 +1045,7 @@ function toggleBlackRectangle(tabs) {
       // Add hover effects
       suggestionItem.addEventListener('mouseenter', function() {
         if (suggestionItems.indexOf(this) !== selectedIndex) {
-          this.style.setProperty('background-color', '#313131', 'important');
+          this.style.setProperty('background-color', '#232323', 'important');
         }
       });
 
@@ -422,7 +1062,7 @@ function toggleBlackRectangle(tabs) {
           action: 'switchToTab',
           tabId: tab.id
         });
-        overlay.remove();
+        removeOverlay(overlay);
         document.removeEventListener('keydown', keydownHandler);
       });
 
@@ -432,7 +1072,7 @@ function toggleBlackRectangle(tabs) {
           action: 'switchToTab',
           tabId: tab.id
         });
-        overlay.remove();
+        removeOverlay(overlay);
         document.removeEventListener('keydown', keydownHandler);
       });
 
@@ -450,6 +1090,7 @@ function toggleBlackRectangle(tabs) {
       all: unset !important;
       position: relative !important;
       width: 100% !important;
+      flex-shrink: 0 !important;
       box-sizing: border-box !important;
       margin: 0 !important;
       padding: 0 !important;

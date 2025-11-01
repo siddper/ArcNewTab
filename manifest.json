@@ -4,36 +4,29 @@
   "version": "1.0.0",
   "description": "Replaces the generic new tab page with a search engine similar to Arc.",
   "permissions": [
-    "storage",
-    "activeTab",
     "scripting",
-    "tabs"
+    "tabs",
+    "history",
+    "topSites"
   ],
+  "icons": {
+    "16": "arc.png",
+    "48": "arc.png",
+    "128": "arc.png"
+  },
   "host_permissions": [
     "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js"
   },
-  "action": {
-    "default_title": "My Chrome Extension",
-    "default_popup": "popup.html"
-  },
   "commands": {
-    "show-popup": {
+    "show-search": {
       "suggested_key": {
         "default": "Ctrl+T",
         "mac": "Command+T"
       },
-      "description": "Show popup"
+      "description": "Show search overlay"
     }
-  },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
-      "run_at": "document_start",
-      "all_frames": true
-    }
-  ]
+  }
 }
